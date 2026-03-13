@@ -10,16 +10,10 @@ os.makedirs("./Files", exist_ok=True)
 
 st.set_page_config(page_title="Code Bank 🏦", layout="wide")
 
-# ─────────────────────────────────────────────
-# CSV paths
-# ─────────────────────────────────────────────
 ACCOUNTS_CSV     = "./Files/accounts.csv"
 TRANSACTIONS_CSV = "./Files/transactions.csv"
 PINS_CSV         = "./Files/pins.csv"
 
-# ─────────────────────────────────────────────
-# CSV helpers — always read fresh from disk
-# ─────────────────────────────────────────────
 def read_accounts() -> pd.DataFrame:
     if os.path.exists(ACCOUNTS_CSV):
         df = pd.read_csv(ACCOUNTS_CSV)
@@ -97,9 +91,6 @@ def append_transaction(acc_id: int, trans_type: str, amount: float, balance_afte
             "timestamp":    datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         })
 
-# ─────────────────────────────────────────────
-# Business logic
-# ─────────────────────────────────────────────
 def create_account(owner: str, acc_type: str, init_balance: float, pin: str) -> int:
     pin = str(pin)
     if not pin.isdigit() or len(pin) != 4:
@@ -152,22 +143,16 @@ def do_transfer(from_id: int, to_id: int, amount: float, from_type: str):
     if from_type == "OverDraftAccount":
         od_limit = get_overdraft_limit(from_id)
         if amount > from_bal + od_limit:
-            raise ValueError(f"Exceeds overdraft limit.")
+            raise ValueError("Exceeds overdraft limit.")
     else:
         if amount > from_bal:
             raise ValueError(f"Insufficient funds. Balance: ${from_bal:,.2f}")
     append_transaction(from_id, f"Transfer Out -> #{to_id}",  amount, from_bal - amount)
     append_transaction(to_id,   f"Transfer In <- #{from_id}", amount, to_bal + amount)
 
-# ─────────────────────────────────────────────
-# Session state
-# ─────────────────────────────────────────────
 if "logged_in_id" not in st.session_state:
     st.session_state.logged_in_id = None
 
-# ─────────────────────────────────────────────
-# App layout
-# ─────────────────────────────────────────────
 st.title("🏦 Code Bank")
 
 tab1, tab2, tab3, tab4 = st.tabs(["📁 Accounts", "⚙️ Admin", "👤 My Account", "📋 Logs"])
@@ -206,8 +191,45 @@ with tab1:
     if df.empty:
         st.info("No accounts yet. Create one above.")
     else:
-        df["balance"] = df["accID"].apply(lambda i: f"${read_balance(int(i)):,.2f}")
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        df_display = df.copy()
+        df_display["balance"] = df_display["accID"].apply(lambda i: f"${read_balance(int(i)):,.2f}")
+        st.dataframe(df_display, use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.subheader("🧪 Showcase")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.write("**Apply Monthly Interest** — all Saving Accounts (7% p.a.)")
+        if st.button("📈 Apply Interest", use_container_width=True):
+            df = read_accounts()
+            saving_accs = df[df["accType"] == "SavingAccount"]
+            if saving_accs.empty:
+                st.warning("No Saving Accounts found.")
+            else:
+                for _, row in saving_accs.iterrows():
+                    acc_id   = int(row["accID"])
+                    balance  = read_balance(acc_id)
+                    interest = round(balance * (0.07 / 12), 4)
+                    append_transaction(acc_id, "Interest Applied", interest, round(balance + interest, 4))
+                st.success(f"✅ Interest applied to {len(saving_accs)} Saving Account(s).")
+                st.rerun()
+
+    with col2:
+        st.write("**Pay Annual Fees ($120)** — all OverDraft Accounts")
+        if st.button("💳 Charge Annual Fees", use_container_width=True):
+            df = read_accounts()
+            od_accs = df[df["accType"] == "OverDraftAccount"]
+            if od_accs.empty:
+                st.warning("No OverDraft Accounts found.")
+            else:
+                for _, row in od_accs.iterrows():
+                    acc_id  = int(row["accID"])
+                    balance = read_balance(acc_id)
+                    append_transaction(acc_id, "Annual Fee", 120, round(balance - 120, 4))
+                st.success(f"✅ Annual fee charged to {len(od_accs)} OverDraft Account(s).")
+                st.rerun()
 
 
 # ══════════════════════════════════════════
@@ -291,13 +313,10 @@ with tab2:
             c1.metric("Account ID", sel_id)
             c2.metric("Owner",      sel_row["owner"])
             c3.metric("Balance",    f"${balance:,.2f}")
-
             if sel_type == "SavingAccount":
                 st.metric("Annual Interest Rate", "7%")
             if sel_type == "OverDraftAccount":
-                od = get_overdraft_limit(sel_id)
-                st.metric("Overdraft Limit", f"${od:,.2f}")
-
+                st.metric("Overdraft Limit", f"${get_overdraft_limit(sel_id):,.2f}")
             st.write("**Transaction History**")
             tx = read_transactions()
             acc_tx = tx[tx["accID"] == sel_id].sort_values("transID", ascending=False)
@@ -308,7 +327,7 @@ with tab2:
 
 
 # ══════════════════════════════════════════
-# TAB 3 — My Account (Customer Portal)
+# TAB 3 — My Account
 # ══════════════════════════════════════════
 with tab3:
     if st.session_state.logged_in_id is None:
@@ -350,9 +369,9 @@ with tab3:
                     st.rerun()
 
             m1, m2, m3 = st.columns(3)
-            m1.metric("Account #", uid)
+            m1.metric("Account #",    uid)
             m2.metric("Account Type", utype)
-            m3.metric("Balance", f"${ubal:,.2f}")
+            m3.metric("Balance",      f"${ubal:,.2f}")
 
             if utype == "OverDraftAccount":
                 od = get_overdraft_limit(uid)
@@ -411,9 +430,9 @@ with tab3:
                     st.dataframe(acc_tx, use_container_width=True, hide_index=True)
 
             with op5:
-                old_p  = st.text_input("Current PIN", type="password", max_chars=4, key="op")
-                new_p  = st.text_input("New PIN",     type="password", max_chars=4, key="np")
-                new_p2 = st.text_input("Confirm New PIN", type="password", max_chars=4, key="np2")
+                old_p  = st.text_input("Current PIN",    type="password", max_chars=4, key="op")
+                new_p  = st.text_input("New PIN",        type="password", max_chars=4, key="np")
+                new_p2 = st.text_input("Confirm New PIN",type="password", max_chars=4, key="np2")
                 if st.button("Update PIN"):
                     if new_p != new_p2:
                         st.error("New PINs don't match.")
