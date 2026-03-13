@@ -7,9 +7,11 @@ A simple **OOP** project that simulates a bank system with additional mini **cas
 - Streamlit
 
 ## What I Did
-- Built basic classes
-- introduced inheritance
-- Built a streamlit app to showcase the functionality
+- Create and manage **regular**, **savings**, and **overdraft** accounts
+- Perform deposits, withdrawals, and transfers between accounts
+- Savings accounts earn **monthly compound interest (7% annually)**
+- Overdraft accounts support **withdrawals beyond balance** up to a set limit
+- All transactions are **logged to CSV** with timestamps
 
 ## What You Can Find Here
 - All classes and functions file
