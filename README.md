@@ -16,6 +16,7 @@ A simple **OOP** project that simulates a bank system with additional mini **cas
 ## What You Can Find Here
 - All classes and functions file
 - Source code of hte streamlit app
+- You can check the app directly from here [App](https://banking-system16.streamlit.app/)
 
 ## About Me
 Hey there! I'm Omar, a data science student who loves digging into data to find patterns and useful insights.  
