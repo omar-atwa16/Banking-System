@@ -1,2 +1,22 @@
 # Banking System
 
+A simple **OOP** project that simulates a bank system with additional mini **cashapp**
+
+## Tools Used
+- Python
+- Streamlit
+
+## What I Did
+- Built basic classes
+- introduced inheritance
+- Built a streamlit app to showcase the functionality
+
+## What You Can Find Here
+- All classes and functions file
+- Source code of hte streamlit app
+
+## About Me
+Hey there! I'm Omar, a data science student who loves digging into data to find patterns and useful insights.  
+I enjoy turning raw numbers into clear, visual stories.
+
+[Let’s connect on LinkedIn](https://www.linkedin.com/in/omar-atwa16)
