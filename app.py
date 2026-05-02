@@ -8,11 +8,20 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(__file__))
 os.makedirs("./Files", exist_ok=True)
 
+# ── Import your actual classes ──────────────────────────────
+from AccountClass import Account
+from AccountTypesClass import SavingAccount, OverDraftAccount
+from BankClass import Bank
+
 st.set_page_config(page_title="Code Bank 🏦", layout="wide")
 
 ACCOUNTS_CSV     = "./Files/accounts.csv"
 TRANSACTIONS_CSV = "./Files/transactions.csv"
 PINS_CSV         = "./Files/pins.csv"
+
+# ══════════════════════════════════════════════════════════
+#  CSV helpers  (read-only — classes handle all writes)
+# ══════════════════════════════════════════════════════════
 
 def read_accounts() -> pd.DataFrame:
     if os.path.exists(ACCOUNTS_CSV):
@@ -34,6 +43,19 @@ def read_balance(acc_id: int) -> float:
     if acc_tx.empty:
         return 0.0
     return float(acc_tx.iloc[-1]["balanceAfter"])
+
+def get_overdraft_limit(acc_id: int) -> float:
+    """Overdraft limit = initial deposit * 2, stored in first transaction."""
+    tx = read_transactions()
+    acc_tx = tx[tx["accID"] == acc_id]
+    if acc_tx.empty:
+        return 0.0
+    first = acc_tx.iloc[0]
+    if "Initial Deposit" in str(first["transType"]):
+        return float(first["amount"]) * 2
+    return 0.0
+
+# ── PIN helpers ─────────────────────────────────────────────
 
 def get_pin(acc_id: int) -> str:
     if os.path.exists(PINS_CSV):
@@ -60,98 +82,75 @@ def save_pin(acc_id: int, pin: str):
         writer.writeheader()
         writer.writerows(rows)
 
-def next_acc_id() -> int:
+# ── next IDs ────────────────────────────────────────────────
+
+def sync_id_counter():
+    """Keep Account.idCounter ahead of whatever is in the CSV."""
     df = read_accounts()
-    return 1 if df.empty else int(df["accID"].max()) + 1
+    if not df.empty:
+        Account.idCounter = int(df["accID"].max()) + 1
 
 def next_trans_id() -> int:
     df = read_transactions()
     return 1 if df.empty else int(df["transID"].max()) + 1
 
-def append_account(acc_id: int, owner: str, acc_type: str):
-    write_header = not os.path.exists(ACCOUNTS_CSV)
-    with open(ACCOUNTS_CSV, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["accID", "owner", "accType"])
-        if write_header:
-            writer.writeheader()
-        writer.writerow({"accID": acc_id, "owner": owner, "accType": acc_type})
+# ══════════════════════════════════════════════════════════
+#  load_account — reconstruct a real class object from CSV
+# ══════════════════════════════════════════════════════════
 
-def append_transaction(acc_id: int, trans_type: str, amount: float, balance_after: float):
-    write_header = not os.path.exists(TRANSACTIONS_CSV)
-    with open(TRANSACTIONS_CSV, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["transID", "accID", "transType", "amount", "balanceAfter", "timestamp"])
-        if write_header:
-            writer.writeheader()
-        writer.writerow({
-            "transID":      next_trans_id(),
-            "accID":        acc_id,
-            "transType":    trans_type,
-            "amount":       round(amount, 4),
-            "balanceAfter": round(balance_after, 4),
-            "timestamp":    datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        })
+def load_account(acc_id: int):
+    """
+    Rebuild the correct Account subclass from CSV state.
+    The object's balance is set to whatever the CSV says,
+    without triggering any logging side-effects.
+    """
+    df = read_accounts()
+    row = df[df["accID"] == acc_id]
+    if row.empty:
+        raise KeyError(f"Account #{acc_id} not found")
 
-def create_account(owner: str, acc_type: str, init_balance: float, pin: str) -> int:
-    pin = str(pin)
-    if not pin.isdigit() or len(pin) != 4:
-        raise ValueError("PIN must be exactly 4 digits")
-    acc_id = next_acc_id()
-    append_account(acc_id, owner, acc_type)
-    save_pin(acc_id, pin)
-    if init_balance > 0:
-        append_transaction(acc_id, "Initial Deposit", init_balance, init_balance)
-    return acc_id
+    acc_type = row.iloc[0]["accType"]
+    owner    = row.iloc[0]["owner"]
+    balance  = read_balance(acc_id)
+    pin      = get_pin(acc_id)
 
-def do_deposit(acc_id: int, amount: float) -> float:
-    if amount <= 0:
-        raise ValueError("Amount must be positive")
-    balance = read_balance(acc_id)
-    new_balance = balance + amount
-    append_transaction(acc_id, "Deposit", amount, new_balance)
-    return new_balance
+    # Temporarily suppress saveAccount + idCounter side-effects
+    original_save   = Account.logger.saveAccount
+    original_log    = Account.logger.log
+    original_counter = Account.idCounter
 
-def get_overdraft_limit(acc_id: int) -> float:
-    tx = read_transactions()
-    acc_tx = tx[tx["accID"] == acc_id]
-    if acc_tx.empty:
-        return 0.0
-    first = acc_tx.iloc[0]
-    if "Initial Deposit" in str(first["transType"]):
-        return float(first["amount"]) * 2
-    return 0.0
+    Account.logger.saveAccount = lambda _: None   # no double-write to accounts.csv
+    Account.logger.log         = lambda *a: None  # no phantom transaction on reconstruct
+    Account.idCounter          = acc_id           # force correct ID
 
-def do_withdraw(acc_id: int, amount: float, acc_type: str) -> float:
-    if amount <= 0:
-        raise ValueError("Amount must be positive")
-    balance = read_balance(acc_id)
-    if acc_type == "OverDraftAccount":
-        od_limit = get_overdraft_limit(acc_id)
-        if amount > balance + od_limit:
-            raise ValueError(f"Exceeds overdraft limit. Max withdrawal: ${balance + od_limit:,.2f}")
-    else:
-        if amount > balance:
-            raise ValueError(f"Insufficient funds. Balance: ${balance:,.2f}")
-    new_balance = balance - amount
-    append_transaction(acc_id, "Withdraw", amount, new_balance)
-    return new_balance
+    try:
+        if acc_type == "SavingAccount":
+            obj = SavingAccount(owner, balance, pin)
+        elif acc_type == "OverDraftAccount":
+            obj = OverDraftAccount(owner, balance, pin)
+            obj.overdraftLimit = get_overdraft_limit(acc_id)
+        else:
+            obj = Account(owner, balance, pin)
+    finally:
+        Account.logger.saveAccount = original_save
+        Account.logger.log         = original_log
+        Account.idCounter          = original_counter
 
-def do_transfer(from_id: int, to_id: int, amount: float, from_type: str):
-    if amount <= 0:
-        raise ValueError("Amount must be positive")
-    from_bal = read_balance(from_id)
-    to_bal   = read_balance(to_id)
-    if from_type == "OverDraftAccount":
-        od_limit = get_overdraft_limit(from_id)
-        if amount > from_bal + od_limit:
-            raise ValueError("Exceeds overdraft limit.")
-    else:
-        if amount > from_bal:
-            raise ValueError(f"Insufficient funds. Balance: ${from_bal:,.2f}")
-    append_transaction(from_id, f"Transfer Out -> #{to_id}",  amount, from_bal - amount)
-    append_transaction(to_id,   f"Transfer In <- #{from_id}", amount, to_bal + amount)
+    # Sync transCounter so new logs get the right ID
+    Account.logger.__class__.transCounter = next_trans_id()
+
+    return obj
+
+# ══════════════════════════════════════════════════════════
+#  Session state
+# ══════════════════════════════════════════════════════════
 
 if "logged_in_id" not in st.session_state:
     st.session_state.logged_in_id = None
+
+# ══════════════════════════════════════════════════════════
+#  UI
+# ══════════════════════════════════════════════════════════
 
 st.title("🏦 Code Bank")
 
@@ -178,8 +177,22 @@ with tab1:
         else:
             pin = pin_input if pin_input else "0000"
             try:
-                acc_id = create_account(owner_name.strip(), acc_type_sel, init_balance, pin)
-                st.success(f"✅ Account #{acc_id} opened for **{owner_name.strip()}** ({acc_type_sel})")
+                sync_id_counter()
+
+                if acc_type_sel == "SavingAccount":
+                    acc = SavingAccount(owner_name.strip(), init_balance, pin)
+                elif acc_type_sel == "OverDraftAccount":
+                    acc = OverDraftAccount(owner_name.strip(), init_balance, pin)
+                else:
+                    acc = Account(owner_name.strip(), init_balance, pin)
+
+                # Save PIN and log the initial deposit if any
+                save_pin(acc.getID(), pin)
+                if init_balance > 0:
+                    Account.logger.__class__.transCounter = next_trans_id()
+                    Account.logger.log(acc.getID(), "Initial Deposit", init_balance, init_balance)
+
+                st.success(f"✅ Account #{acc.getID()} opened for **{owner_name.strip()}** ({acc_type_sel})")
                 st.rerun()
             except ValueError as e:
                 st.error(str(e))
@@ -209,10 +222,13 @@ with tab1:
                 st.warning("No Saving Accounts found.")
             else:
                 for _, row in saving_accs.iterrows():
-                    acc_id   = int(row["accID"])
-                    balance  = read_balance(acc_id)
-                    interest = round(balance * (0.07 / 12), 4)
-                    append_transaction(acc_id, "Interest Applied", interest, round(balance + interest, 4))
+                    acc = load_account(int(row["accID"]))   # real SavingAccount object
+                    # applyInterest() updates balance in-memory; we log it ourselves
+                    balance_before = acc.getBalance()
+                    interest = round(balance_before * (acc.interestRate / 12), 4)
+                    acc.setBalance(balance_before + interest)
+                    Account.logger.__class__.transCounter = next_trans_id()
+                    Account.logger.log(acc.getID(), "Interest Applied", interest, acc.getBalance())
                 st.success(f"✅ Interest applied to {len(saving_accs)} Saving Account(s).")
                 st.rerun()
 
@@ -225,9 +241,10 @@ with tab1:
                 st.warning("No OverDraft Accounts found.")
             else:
                 for _, row in od_accs.iterrows():
-                    acc_id  = int(row["accID"])
-                    balance = read_balance(acc_id)
-                    append_transaction(acc_id, "Annual Fee", 120, round(balance - 120, 4))
+                    acc = load_account(int(row["accID"]))   # real OverDraftAccount object
+                    acc.payAnnualFees()                      # uses the class method
+                    Account.logger.__class__.transCounter = next_trans_id()
+                    Account.logger.log(acc.getID(), "Annual Fee", OverDraftAccount.annualFees, acc.getBalance())
                 st.success(f"✅ Annual fee charged to {len(od_accs)} OverDraft Account(s).")
                 st.rerun()
 
@@ -263,8 +280,10 @@ with tab2:
             amount = st.number_input("Amount ($)", min_value=0.01, value=100.0, step=50.0, key="adep")
             if st.button("Deposit", key="adep_btn"):
                 try:
-                    new_bal = do_deposit(sel_id, amount)
-                    st.success(f"Deposited ${amount:,.2f} → New balance: ${new_bal:,.2f}")
+                    acc = load_account(sel_id)
+                    acc.deposit(amount)          # real Account.deposit()
+                    st.success(f"Deposited ${amount:,.2f} → New balance: ${acc.getBalance():,.2f}")
+                    st.rerun()
                 except ValueError as e:
                     st.error(str(e))
 
@@ -272,8 +291,10 @@ with tab2:
             amount = st.number_input("Amount ($)", min_value=0.01, value=100.0, step=50.0, key="awd")
             if st.button("Withdraw", key="awd_btn"):
                 try:
-                    new_bal = do_withdraw(sel_id, amount, sel_type)
-                    st.success(f"Withdrew ${amount:,.2f} → New balance: ${new_bal:,.2f}")
+                    acc = load_account(sel_id)
+                    acc.withdraw(amount)         # real Account/OverDraftAccount.withdraw()
+                    st.success(f"Withdrew ${amount:,.2f} → New balance: ${acc.getBalance():,.2f}")
+                    st.rerun()
                 except ValueError as e:
                     st.error(str(e))
 
@@ -290,8 +311,11 @@ with tab2:
                 amount     = st.number_input("Amount ($)", min_value=0.01, value=100.0, step=50.0, key="atr")
                 if st.button("Transfer", key="atr_btn"):
                     try:
-                        do_transfer(sel_id, recv_id, amount, sel_type)
+                        sender   = load_account(sel_id)
+                        receiver = load_account(recv_id)
+                        sender.transfer(receiver, amount)    # real Account.transfer()
                         st.success(f"Transferred ${amount:,.2f} to #{recv_id}")
+                        st.rerun()
                     except ValueError as e:
                         st.error(str(e))
 
@@ -299,24 +323,28 @@ with tab2:
             if sel_type != "SavingAccount":
                 st.warning("Only Saving Accounts earn interest (7% p.a.).")
             else:
-                balance = read_balance(sel_id)
-                monthly_interest = balance * (0.07 / 12)
+                acc = load_account(sel_id)
+                balance = acc.getBalance()
+                monthly_interest = round(balance * (acc.interestRate / 12), 4)
                 st.info(f"Current balance: **${balance:,.2f}** · Monthly interest: **${monthly_interest:,.4f}**")
                 if st.button("Apply Monthly Interest"):
-                    new_bal = balance + monthly_interest
-                    append_transaction(sel_id, "Interest Applied", round(monthly_interest, 4), new_bal)
-                    st.success(f"Interest of ${monthly_interest:,.4f} applied → Balance: ${new_bal:,.2f}")
+                    acc.setBalance(balance + monthly_interest)
+                    Account.logger.__class__.transCounter = next_trans_id()
+                    Account.logger.log(acc.getID(), "Interest Applied", monthly_interest, acc.getBalance())
+                    st.success(f"Interest of ${monthly_interest:,.4f} applied → Balance: ${acc.getBalance():,.2f}")
+                    st.rerun()
 
         elif operation == "View Info":
-            balance = read_balance(sel_id)
+            acc     = load_account(sel_id)
+            balance = acc.getBalance()
             c1, c2, c3 = st.columns(3)
             c1.metric("Account ID", sel_id)
-            c2.metric("Owner",      sel_row["owner"])
+            c2.metric("Owner",      acc.getOwner())
             c3.metric("Balance",    f"${balance:,.2f}")
             if sel_type == "SavingAccount":
-                st.metric("Annual Interest Rate", "7%")
+                st.metric("Annual Interest Rate", f"{acc.interestRate*100:.0f}%")
             if sel_type == "OverDraftAccount":
-                st.metric("Overdraft Limit", f"${get_overdraft_limit(sel_id):,.2f}")
+                st.metric("Overdraft Limit", f"${acc.overdraftLimit:,.2f}")
             st.write("**Transaction History**")
             tx = read_transactions()
             acc_tx = tx[tx["accID"] == sel_id].sort_values("transID", ascending=False)
@@ -349,35 +377,34 @@ with tab3:
             else:
                 st.error("Incorrect PIN.")
     else:
-        uid  = st.session_state.logged_in_id
-        df   = read_accounts()
+        uid = st.session_state.logged_in_id
+        df  = read_accounts()
 
         if uid not in df["accID"].values:
             st.error("Account no longer exists.")
             st.session_state.logged_in_id = None
         else:
-            urow  = df[df["accID"] == uid].iloc[0]
-            ubal  = read_balance(uid)
-            utype = urow["accType"]
+            acc   = load_account(uid)      # real object
+            utype = acc.accType
 
             c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
             with c1:
-                st.subheader(f"Welcome, {urow['owner']} 👋")
+                st.subheader(f"Welcome, {acc.getOwner()} 👋")
             with c4:
                 if st.button("Sign Out"):
                     st.session_state.logged_in_id = None
                     st.rerun()
 
             m1, m2, m3 = st.columns(3)
-            m1.metric("Account #",    uid)
+            m1.metric("Account #",    acc.getID())
             m2.metric("Account Type", utype)
-            m3.metric("Balance",      f"${ubal:,.2f}")
+            m3.metric("Balance",      f"${acc.getBalance():,.2f}")
 
             if utype == "OverDraftAccount":
-                od = get_overdraft_limit(uid)
-                st.caption(f"Overdraft limit: ${od:,.2f} · Available: ${ubal + od:,.2f}")
+                od = acc.overdraftLimit
+                st.caption(f"Overdraft limit: ${od:,.2f} · Available: ${acc.getBalance() + od:,.2f}")
             if utype == "SavingAccount":
-                st.caption(f"Annual interest: 7% · Monthly: ${ubal * (0.07/12):,.2f}")
+                st.caption(f"Annual interest: 7% · Monthly: ${acc.getBalance() * (acc.interestRate/12):,.2f}")
 
             st.divider()
 
@@ -387,8 +414,9 @@ with tab3:
                 dep_amt = st.number_input("Amount ($)", min_value=0.01, value=100.0, step=50.0, key="udep")
                 if st.button("Deposit", key="udep_btn"):
                     try:
-                        new_bal = do_deposit(uid, dep_amt)
-                        st.success(f"Deposited ${dep_amt:,.2f} → Balance: ${new_bal:,.2f}")
+                        fresh = load_account(uid)
+                        fresh.deposit(dep_amt)       # real Account.deposit()
+                        st.success(f"Deposited ${dep_amt:,.2f} → Balance: ${fresh.getBalance():,.2f}")
                         st.rerun()
                     except ValueError as e:
                         st.error(str(e))
@@ -397,8 +425,9 @@ with tab3:
                 wd_amt = st.number_input("Amount ($)", min_value=0.01, value=100.0, step=50.0, key="uwd")
                 if st.button("Withdraw", key="uwd_btn"):
                     try:
-                        new_bal = do_withdraw(uid, wd_amt, utype)
-                        st.success(f"Withdrew ${wd_amt:,.2f} → Balance: ${new_bal:,.2f}")
+                        fresh = load_account(uid)
+                        fresh.withdraw(wd_amt)       # real Account/OverDraftAccount.withdraw()
+                        st.success(f"Withdrew ${wd_amt:,.2f} → Balance: ${fresh.getBalance():,.2f}")
                         st.rerun()
                     except ValueError as e:
                         st.error(str(e))
@@ -415,7 +444,9 @@ with tab3:
                     tr_amt    = st.number_input("Amount ($)", min_value=0.01, value=100.0, step=50.0, key="utr")
                     if st.button("Send Transfer", key="utr_btn"):
                         try:
-                            do_transfer(uid, other_accs[tr_target], tr_amt, utype)
+                            sender   = load_account(uid)
+                            receiver = load_account(other_accs[tr_target])
+                            sender.transfer(receiver, tr_amt)    # real Account.transfer()
                             st.success(f"Sent ${tr_amt:,.2f} to {tr_target}")
                             st.rerun()
                         except ValueError as e:
@@ -430,19 +461,22 @@ with tab3:
                     st.dataframe(acc_tx, use_container_width=True, hide_index=True)
 
             with op5:
-                old_p  = st.text_input("Current PIN",    type="password", max_chars=4, key="op")
-                new_p  = st.text_input("New PIN",        type="password", max_chars=4, key="np")
-                new_p2 = st.text_input("Confirm New PIN",type="password", max_chars=4, key="np2")
+                old_p  = st.text_input("Current PIN",     type="password", max_chars=4, key="op")
+                new_p  = st.text_input("New PIN",         type="password", max_chars=4, key="np")
+                new_p2 = st.text_input("Confirm New PIN", type="password", max_chars=4, key="np2")
                 if st.button("Update PIN"):
                     if new_p != new_p2:
                         st.error("New PINs don't match.")
                     elif old_p != get_pin(uid):
                         st.error("Current PIN is incorrect.")
-                    elif not new_p.isdigit() or len(new_p) != 4:
-                        st.error("PIN must be exactly 4 digits.")
                     else:
-                        save_pin(uid, new_p)
-                        st.success("PIN updated successfully.")
+                        try:
+                            fresh = load_account(uid)
+                            fresh.setPin(old_p, new_p)   # real Account.setPin() with validation
+                            save_pin(uid, new_p)
+                            st.success("PIN updated successfully.")
+                        except ValueError as e:
+                            st.error(str(e))
 
 
 # ══════════════════════════════════════════
